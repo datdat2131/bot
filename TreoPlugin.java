@@ -120,7 +120,9 @@ public class TreoPlugin extends JavaPlugin implements Listener {
         try {
             ServerLevel level = ((CraftWorld) a.loc.getWorld()).getHandle();
 
-            GameProfile profile = new GameProfile(id, a.name);
+            // Bot dùng cùng UUID nhưng khác tên (thêm đuôi _AFK) để nLogin không báo "đã online"
+            String botName = botNameOf(a.name);
+            GameProfile profile = new GameProfile(id, botName);
             if (a.skinValue != null) {
                 profile.getProperties().put("textures", new Property("textures", a.skinValue, a.skinSig));
             }
@@ -132,7 +134,7 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             bots.put(id, bot); // đăng ký trước để các event biết đây là bot
             conns.put(id, conn);
 
-            nLoginForce(a.name); // đăng nhập trước nếu nLogin cho phép
+            nLoginForce(botName); // đăng nhập trước nếu nLogin cho phép
             server.getPlayerList().placeNewPlayer(conn, bot, cookie);
 
             Player bp = bot.getBukkitEntity();
@@ -141,8 +143,8 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             bp.setCollidable(false);
 
             // Đăng nhập hộ bot với nLogin sau khi đã vào game
-            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(a.name), 2L);
-            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(a.name), 40L);
+            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 2L);
+            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 40L);
         } catch (Throwable t) {
             getLogger().log(Level.SEVERE, "Không tạo được bot cho " + a.name + ": " + t, t);
             failed.add(id);
@@ -156,6 +158,11 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             if (c != null) c.closeQuietly();
             bots.remove(id);
         }
+    }
+
+    private static String botNameOf(String realName) {
+        String base = realName.length() > 12 ? realName.substring(0, 12) : realName;
+        return base + "_AFK";
     }
 
     private void removeBot(UUID id) {
