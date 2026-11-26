@@ -32,6 +32,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -46,7 +49,8 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     }
 
     private final Map<UUID, Afk> afk = new HashMap<>();
-    private final Map<UUID, ServerPlayer> bots = new HashMap<>();
+    private final Map<UUID, ServerPlayer> bots = new HashMap<>();   // UUID thật -> bot
+    private final Map<UUID, UUID> botIds = new HashMap<>();         // UUID của bot -> UUID thật
     private final Map<UUID, FakeConnection> conns = new HashMap<>();
     private final Set<UUID> failed = new HashSet<>();
     private File dataFile;
@@ -112,17 +116,71 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     }
 
     // ------------------------------------------------ Bot (người chơi giả)
+    // Bot dùng UUID và tên RIÊNG (tên có đuôi _AFK) để không đụng độ với nLogin / PacketEvents
+    // khi người thật vào lại. Dữ liệu người chơi (túi đồ, vị trí...) được sao chép qua lại.
+
+    private boolean isBot(UUID uuid) {
+        return botIds.containsKey(uuid);
+    }
+
+    private static UUID botUuidOf(UUID realId) {
+        return UUID.nameUUIDFromBytes(("TreoBot:" + realId).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String botNameOf(String realName) {
+        String base = realName.length() > 12 ? realName.substring(0, 12) : realName;
+        return base + "_AFK";
+    }
+
+    private File playerDataDir() {
+        return new File(Bukkit.getWorlds().get(0).getWorldFolder(), "playerdata");
+    }
+
+    private void copyData(UUID from, UUID to) {
+        try {
+            File dir = playerDataDir();
+            File src = new File(dir, from + ".dat");
+            if (!src.exists()) return;
+            Files.copy(src.toPath(), new File(dir, to + ".dat").toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Throwable t) {
+            getLogger().warning("Không sao chép được dữ liệu người chơi: " + t);
+        }
+    }
+
+    private void deleteData(UUID uuid) {
+        try {
+            File dir = playerDataDir();
+            new File(dir, uuid + ".dat").delete();
+            new File(dir, uuid + ".dat_old").delete();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Lưu dữ liệu bot rồi chép về file của người thật (phải gọi ở luồng chính). */
+    private void syncBotToReal(UUID realId) {
+        ServerPlayer bot = bots.get(realId);
+        if (bot == null) return;
+        try {
+            bot.getBukkitEntity().saveData();
+            copyData(bot.getUUID(), realId);
+        } catch (Throwable t) {
+            getLogger().log(Level.WARNING, "Không lưu được dữ liệu bot: " + t, t);
+        }
+    }
+
     private void spawnBot(UUID id) {
         Afk a = afk.get(id);
         if (a == null || a.loc.getWorld() == null || bots.containsKey(id)) return;
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
         ServerPlayer bot = null;
+        UUID botId = botUuidOf(id);
         try {
             ServerLevel level = ((CraftWorld) a.loc.getWorld()).getHandle();
-
-            // Bot dùng cùng UUID nhưng khác tên (thêm đuôi _AFK) để nLogin không báo "đã online"
             String botName = botNameOf(a.name);
-            GameProfile profile = new GameProfile(id, botName);
+
+            copyData(id, botId); // bot bắt đầu với đúng túi đồ/vị trí của người thật
+
+            GameProfile profile = new GameProfile(botId, botName);
             if (a.skinValue != null) {
                 profile.getProperties().put("textures", new Property("textures", a.skinValue, a.skinSig));
             }
@@ -131,10 +189,11 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             FakeConnection conn = new FakeConnection();
             CommonListenerCookie cookie = CommonListenerCookie.createInitial(profile, false);
 
-            bots.put(id, bot); // đăng ký trước để các event biết đây là bot
+            bots.put(id, bot);
+            botIds.put(botId, id);
             conns.put(id, conn);
 
-            nLoginForce(botName); // đăng nhập trước nếu nLogin cho phép
+            nLoginForce(botName);
             server.getPlayerList().placeNewPlayer(conn, bot, cookie);
 
             Player bp = bot.getBukkitEntity();
@@ -142,14 +201,13 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             bp.setInvulnerable(true);
             bp.setCollidable(false);
 
-            // Đăng nhập hộ bot với nLogin sau khi đã vào game
             Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 2L);
             Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 40L);
         } catch (Throwable t) {
             getLogger().log(Level.SEVERE, "Không tạo được bot cho " + a.name + ": " + t, t);
             failed.add(id);
             try {
-                if (bot != null && server.getPlayerList().getPlayer(id) != null) {
+                if (bot != null && server.getPlayerList().getPlayer(botId) != null) {
                     server.getPlayerList().remove(bot);
                 }
             } catch (Throwable ignored) {
@@ -157,28 +215,32 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             FakeConnection c = conns.remove(id);
             if (c != null) c.closeQuietly();
             bots.remove(id);
+            botIds.remove(botId);
+            deleteData(botId);
         }
-    }
-
-    private static String botNameOf(String realName) {
-        String base = realName.length() > 12 ? realName.substring(0, 12) : realName;
-        return base + "_AFK";
     }
 
     private void removeBot(UUID id) {
         ServerPlayer bot = bots.get(id);
         if (bot == null) return;
+        UUID botId = bot.getUUID();
         String name = afk.containsKey(id) ? afk.get(id).name : id.toString();
         try {
+            // Nếu người thật không online thì chép dữ liệu bot về cho họ
+            if (Bukkit.getPlayer(id) == null) {
+                syncBotToReal(id);
+            }
             ((CraftServer) Bukkit.getServer()).getServer().getPlayerList().remove(bot);
         } catch (Throwable t) {
             getLogger().log(Level.SEVERE, "Lỗi khi gỡ bot " + name + ": " + t, t);
         } finally {
             bots.remove(id);
+            botIds.remove(botId);
             FakeConnection c = conns.remove(id);
             if (c != null) c.closeQuietly();
         }
-        if (Bukkit.getPlayer(id) != null) {
+        deleteData(botId);
+        if (Bukkit.getPlayer(botId) != null) {
             getLogger().severe("Bot " + name + " vẫn còn trong danh sách người chơi sau khi gỡ!");
         } else {
             getLogger().info("Đã gỡ bot " + name + ".");
@@ -201,38 +263,32 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     /** Không cho plugin khác (vd. nLogin) kick bot. */
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onKick(PlayerKickEvent e) {
-        if (bots.containsKey(e.getPlayer().getUniqueId())) {
+        if (isBot(e.getPlayer().getUniqueId())) {
             e.setCancelled(true);
         }
     }
 
     // ------------------------------------------------ Vào / thoát game
-    /** Người chơi thật sắp vào lại: gỡ bot trước để dữ liệu được lưu và UUID được giải phóng. */
+    /**
+     * Người thật sắp vào lại: lưu dữ liệu bot và chép về file của người thật TRƯỚC khi server nạp dữ liệu.
+     * Bot chưa bị gỡ ở bước này (khác tên, khác UUID nên không đụng độ), sẽ gỡ sau khi người thật đã vào.
+     */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPreLogin(AsyncPlayerPreLoginEvent e) {
         UUID id = e.getUniqueId();
         if (!bots.containsKey(id)) return;
         try {
-            Bukkit.getScheduler().callSyncMethod(this, () -> { removeBot(id); return null; })
+            Bukkit.getScheduler().callSyncMethod(this, () -> { syncBotToReal(id); return null; })
                     .get(10, TimeUnit.SECONDS);
         } catch (Exception ex) {
-            getLogger().warning("Không gỡ được bot của " + e.getName() + ": " + ex);
-        }
-    }
-
-    /** Cơ hội thứ hai (luồng chính): gỡ bot nếu vẫn còn khi người thật đăng nhập. */
-    @EventHandler(priority = EventPriority.LOWEST)
-    public void onLogin(PlayerLoginEvent e) {
-        UUID id = e.getPlayer().getUniqueId();
-        if (bots.containsKey(id)) {
-            removeBot(id);
+            getLogger().warning("Không đồng bộ được dữ liệu bot của " + e.getName() + ": " + ex);
         }
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         UUID id = e.getPlayer().getUniqueId();
-        if (bots.containsKey(id)) {      // đây là bot bị gỡ
+        if (isBot(id)) {                 // bot bị gỡ
             e.quitMessage(null);
             return;
         }
@@ -246,7 +302,7 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
         UUID id = p.getUniqueId();
-        if (bots.containsKey(id)) {      // bot join: không thông báo
+        if (isBot(id)) {                 // bot join: không thông báo
             e.joinMessage(null);
             return;
         }
@@ -255,6 +311,14 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             p.teleport(a.loc);
             p.setInvulnerable(true);
             p.sendMessage(Component.text("Bạn đang ở trạng thái treo. Dùng /huytreo để hoạt động lại.", NamedTextColor.YELLOW));
+        }
+        // Người thật đã vào xong: gỡ bot (nếu còn)
+        if (bots.containsKey(id)) {
+            Bukkit.getScheduler().runTask(this, () -> {
+                removeBot(id);
+                // Nếu người thật lỡ thoát ngay trong lúc đó và vẫn đang treo thì tạo lại bot
+                if (afk.containsKey(id) && Bukkit.getPlayer(id) == null) spawnBot(id);
+            });
         }
     }
 
