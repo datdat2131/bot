@@ -161,12 +161,20 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     private void removeBot(UUID id) {
         ServerPlayer bot = bots.get(id);
         if (bot == null) return;
+        String name = afk.containsKey(id) ? afk.get(id).name : id.toString();
         try {
             ((CraftServer) Bukkit.getServer()).getServer().getPlayerList().remove(bot);
+        } catch (Throwable t) {
+            getLogger().log(Level.SEVERE, "Lỗi khi gỡ bot " + name + ": " + t, t);
         } finally {
             bots.remove(id);
             FakeConnection c = conns.remove(id);
             if (c != null) c.closeQuietly();
+        }
+        if (Bukkit.getPlayer(id) != null) {
+            getLogger().severe("Bot " + name + " vẫn còn trong danh sách người chơi sau khi gỡ!");
+        } else {
+            getLogger().info("Đã gỡ bot " + name + ".");
         }
     }
 
@@ -193,7 +201,7 @@ public class TreoPlugin extends JavaPlugin implements Listener {
 
     // ------------------------------------------------ Vào / thoát game
     /** Người chơi thật sắp vào lại: gỡ bot trước để dữ liệu được lưu và UUID được giải phóng. */
-    @EventHandler
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onPreLogin(AsyncPlayerPreLoginEvent e) {
         UUID id = e.getUniqueId();
         if (!bots.containsKey(id)) return;
@@ -202,6 +210,15 @@ public class TreoPlugin extends JavaPlugin implements Listener {
                     .get(10, TimeUnit.SECONDS);
         } catch (Exception ex) {
             getLogger().warning("Không gỡ được bot của " + e.getName() + ": " + ex);
+        }
+    }
+
+    /** Cơ hội thứ hai (luồng chính): gỡ bot nếu vẫn còn khi người thật đăng nhập. */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onLogin(PlayerLoginEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
+        if (bots.containsKey(id)) {
+            removeBot(id);
         }
     }
 
