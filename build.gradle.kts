@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "vn.treo"
-version = "2.1"
+version = "2.2"
 
 repositories {
     mavenCentral()
@@ -14,6 +14,7 @@ repositories {
 dependencies {
     // Đổi số phiên bản này cho khớp server của bạn
     paperweight.paperDevBundle("1.21.4-R0.1-SNAPSHOT")
+    compileOnly("net.luckperms:api:5.4")
 }
 
 java {

@@ -5,6 +5,7 @@ import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
@@ -19,6 +20,7 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.CraftWorld;
+import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -60,6 +62,12 @@ public class TreoPlugin extends JavaPlugin implements Listener {
         dataFile = new File(getDataFolder(), "data.yml");
         loadData();
         getServer().getPluginManager().registerEvents(this, this);
+        // Gửi lại mục tab của bot cho mọi người mỗi 5 giây (phòng khi plugin tab làm mất)
+        Bukkit.getScheduler().runTaskTimer(this, this::showBotsInTab, 100L, 100L);
+        // Bot không có kết nối thật nên server không tick nó: tự tick để nhặt đồ, rơi, v.v.
+        Bukkit.getScheduler().runTaskTimer(this, this::tickBots, 1L, 1L);
+        // Sao chép rank (LuckPerms) từ người thật sang bot mỗi 30 giây
+        Bukkit.getScheduler().runTaskTimer(this, this::syncRanks, 200L, 600L);
         // Sau khi server khởi động xong: tạo lại bot cho những người đang treo
         Bukkit.getScheduler().runTaskLater(this, () -> {
             for (UUID id : new ArrayList<>(afk.keySet())) {
@@ -201,6 +209,8 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             bp.setInvulnerable(true);
             bp.setCollidable(false);
 
+            Bukkit.getScheduler().runTaskLater(this, this::showBotsInTab, 10L);
+            Bukkit.getScheduler().runTaskLater(this, this::syncRanks, 5L);
             Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 2L);
             Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(botName), 40L);
         } catch (Throwable t) {
@@ -244,6 +254,59 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             getLogger().severe("Bot " + name + " vẫn còn trong danh sách người chơi sau khi gỡ!");
         } else {
             getLogger().info("Đã gỡ bot " + name + ".");
+        }
+    }
+
+    /** Gửi gói "thêm người chơi vào tab" của các bot cho tất cả người chơi thật đang online. */
+    private void showBotsInTab() {
+        if (bots.isEmpty()) return;
+        try {
+            for (ServerPlayer bot : new ArrayList<>(bots.values())) {
+                ClientboundPlayerInfoUpdatePacket packet = new ClientboundPlayerInfoUpdatePacket(
+                        EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.ADD_PLAYER,
+                                ClientboundPlayerInfoUpdatePacket.Action.UPDATE_LISTED,
+                                ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE,
+                                ClientboundPlayerInfoUpdatePacket.Action.UPDATE_LATENCY),
+                        List.of(bot));
+                for (Player p : Bukkit.getOnlinePlayers()) {
+                    if (isBot(p.getUniqueId())) continue;
+                    ((CraftPlayer) p).getHandle().connection.send(packet);
+                }
+            }
+        } catch (Throwable t) {
+            getLogger().fine("Không gửi được mục tab của bot: " + t);
+        }
+    }
+
+    private int tickCount = 0;
+
+    /** Tick bot thủ công (giống cách mod Carpet làm với người chơi giả). */
+    private void tickBots() {
+        if (bots.isEmpty()) return;
+        tickCount++;
+        for (ServerPlayer bot : new ArrayList<>(bots.values())) {
+            try {
+                if (tickCount % 10 == 0) {
+                    bot.connection.resetPosition();
+                    bot.serverLevel().getChunkSource().move(bot);
+                }
+                bot.doTick();
+            } catch (Throwable t) {
+                getLogger().fine("Lỗi khi tick bot: " + t);
+            }
+        }
+    }
+
+    /** Chép rank/quyền của người thật sang bot để tab và tên hiển thị đúng rank. */
+    private void syncRanks() {
+        if (bots.isEmpty()) return;
+        if (!Bukkit.getPluginManager().isPluginEnabled("LuckPerms")) return;
+        for (Map.Entry<UUID, ServerPlayer> en : new ArrayList<>(bots.entrySet())) {
+            try {
+                LuckPermsHook.copyNodes(en.getKey(), en.getValue().getUUID());
+            } catch (Throwable t) {
+                getLogger().fine("Không sao chép được rank: " + t);
+            }
         }
     }
 
@@ -306,6 +369,7 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             e.joinMessage(null);
             return;
         }
+        Bukkit.getScheduler().runTaskLater(this, this::showBotsInTab, 20L);
         Afk a = afk.get(id);
         if (a != null) {
             p.teleport(a.loc);
