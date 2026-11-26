@@ -1,5 +1,5 @@
 name: TreoPlugin
-version: 2.2
+version: 2.3
 main: vn.treo.TreoPlugin
 api-version: '1.21'
 softdepend: [nLogin, ProtocolLib, ViaVersion, LuckPerms, TAB]

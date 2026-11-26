@@ -279,6 +279,8 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     }
 
     private int tickCount = 0;
+    private boolean tickErrorLogged = false;
+    private boolean nLoginLogged = false;
 
     /** Tick bot thủ công (giống cách mod Carpet làm với người chơi giả). */
     private void tickBots() {
@@ -292,7 +294,10 @@ public class TreoPlugin extends JavaPlugin implements Listener {
                 }
                 bot.doTick();
             } catch (Throwable t) {
-                getLogger().fine("Lỗi khi tick bot: " + t);
+                if (!tickErrorLogged) {
+                    tickErrorLogged = true;
+                    getLogger().log(Level.WARNING, "Lỗi khi tick bot (chỉ báo 1 lần): " + t, t);
+                }
             }
         }
     }
@@ -315,11 +320,36 @@ public class TreoPlugin extends JavaPlugin implements Listener {
         try {
             Class<?> c = Class.forName("com.nickuc.login.api.nLoginAPI");
             Object api = c.getMethod("getApi").invoke(null);
-            c.getMethod("forceLogin", String.class).invoke(api, name);
+            Object result = c.getMethod("forceLogin", String.class).invoke(api, name);
+            if (!nLoginLogged) {
+                nLoginLogged = true;
+                getLogger().info("nLogin forceLogin(" + name + ") -> " + result);
+            }
         } catch (ClassNotFoundException ignored) {
-            // không cài nLogin
+            if (!nLoginLogged && Bukkit.getPluginManager().isPluginEnabled("nLogin")) {
+                nLoginLogged = true;
+                getLogger().warning("Có nLogin nhưng không thấy lớp API nLoginAPI.");
+            }
         } catch (Throwable t) {
-            getLogger().fine("nLogin forceLogin không chạy được: " + t);
+            if (!nLoginLogged) {
+                nLoginLogged = true;
+                getLogger().warning("nLogin forceLogin lỗi: " + t);
+            }
+        }
+    }
+
+    /** Plugin đăng nhập (nLogin) hay chặn nhặt đồ của người chưa đăng nhập: mở lại cho bot. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onBotPickup(EntityPickupItemEvent e) {
+        if (e.getEntity() instanceof Player p && isBot(p.getUniqueId()) && e.isCancelled()) {
+            e.setCancelled(false);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onBotAttemptPickup(io.papermc.paper.event.player.PlayerAttemptPickupItemEvent e) {
+        if (isBot(e.getPlayer().getUniqueId()) && e.isCancelled()) {
+            e.setCancelled(false);
         }
     }
 

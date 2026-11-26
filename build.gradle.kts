@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "vn.treo"
-version = "2.2"
+version = "2.3"
 
 repositories {
     mavenCentral()
