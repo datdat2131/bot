@@ -5,7 +5,6 @@ import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.minecraft.network.Connection;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
@@ -35,6 +34,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 
 public class TreoPlugin extends JavaPlugin implements Listener {
 
@@ -47,6 +47,8 @@ public class TreoPlugin extends JavaPlugin implements Listener {
 
     private final Map<UUID, Afk> afk = new HashMap<>();
     private final Map<UUID, ServerPlayer> bots = new HashMap<>();
+    private final Map<UUID, FakeConnection> conns = new HashMap<>();
+    private final Set<UUID> failed = new HashSet<>();
     private File dataFile;
 
     @Override
@@ -57,13 +59,16 @@ public class TreoPlugin extends JavaPlugin implements Listener {
         // Sau khi server khởi động xong: tạo lại bot cho những người đang treo
         Bukkit.getScheduler().runTaskLater(this, () -> {
             for (UUID id : new ArrayList<>(afk.keySet())) {
-                if (Bukkit.getPlayer(id) == null) spawnBot(id);
+                if (Bukkit.getPlayer(id) == null && !failed.contains(id)) spawnBot(id);
             }
         }, 20L);
     }
 
     @Override
     public void onDisable() {
+        for (UUID id : new ArrayList<>(bots.keySet())) {
+            try { removeBot(id); } catch (Throwable ignored) { }
+        }
         saveData();
     }
 
@@ -110,8 +115,9 @@ public class TreoPlugin extends JavaPlugin implements Listener {
     private void spawnBot(UUID id) {
         Afk a = afk.get(id);
         if (a == null || a.loc.getWorld() == null || bots.containsKey(id)) return;
+        MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
+        ServerPlayer bot = null;
         try {
-            MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
             ServerLevel level = ((CraftWorld) a.loc.getWorld()).getHandle();
 
             GameProfile profile = new GameProfile(id, a.name);
@@ -119,21 +125,36 @@ public class TreoPlugin extends JavaPlugin implements Listener {
                 profile.getProperties().put("textures", new Property("textures", a.skinValue, a.skinSig));
             }
 
-            ServerPlayer bot = new ServerPlayer(server, level, profile, ClientInformation.createDefault());
-            Connection conn = new FakeConnection();
+            bot = new ServerPlayer(server, level, profile, ClientInformation.createDefault());
+            FakeConnection conn = new FakeConnection();
             CommonListenerCookie cookie = CommonListenerCookie.createInitial(profile, false);
 
             bots.put(id, bot); // đăng ký trước để các event biết đây là bot
+            conns.put(id, conn);
+
+            nLoginForce(a.name); // đăng nhập trước nếu nLogin cho phép
             server.getPlayerList().placeNewPlayer(conn, bot, cookie);
 
             Player bp = bot.getBukkitEntity();
             bp.teleport(a.loc);
             bp.setInvulnerable(true);
             bp.setCollidable(false);
+
+            // Đăng nhập hộ bot với nLogin sau khi đã vào game
+            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(a.name), 2L);
+            Bukkit.getScheduler().runTaskLater(this, () -> nLoginForce(a.name), 40L);
         } catch (Throwable t) {
+            getLogger().log(Level.SEVERE, "Không tạo được bot cho " + a.name + ": " + t, t);
+            failed.add(id);
+            try {
+                if (bot != null && server.getPlayerList().getPlayer(id) != null) {
+                    server.getPlayerList().remove(bot);
+                }
+            } catch (Throwable ignored) {
+            }
+            FakeConnection c = conns.remove(id);
+            if (c != null) c.closeQuietly();
             bots.remove(id);
-            getLogger().severe("Không tạo được bot cho " + a.name + ": " + t);
-            t.printStackTrace();
         }
     }
 
@@ -144,6 +165,29 @@ public class TreoPlugin extends JavaPlugin implements Listener {
             ((CraftServer) Bukkit.getServer()).getServer().getPlayerList().remove(bot);
         } finally {
             bots.remove(id);
+            FakeConnection c = conns.remove(id);
+            if (c != null) c.closeQuietly();
+        }
+    }
+
+    /** Gọi API nLogin (nếu có) để đăng nhập hộ bot. Dùng reflection nên không bắt buộc có nLogin. */
+    private void nLoginForce(String name) {
+        try {
+            Class<?> c = Class.forName("com.nickuc.login.api.nLoginAPI");
+            Object api = c.getMethod("getApi").invoke(null);
+            c.getMethod("forceLogin", String.class).invoke(api, name);
+        } catch (ClassNotFoundException ignored) {
+            // không cài nLogin
+        } catch (Throwable t) {
+            getLogger().fine("nLogin forceLogin không chạy được: " + t);
+        }
+    }
+
+    /** Không cho plugin khác (vd. nLogin) kick bot. */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onKick(PlayerKickEvent e) {
+        if (bots.containsKey(e.getPlayer().getUniqueId())) {
+            e.setCancelled(true);
         }
     }
 

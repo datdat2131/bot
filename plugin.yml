@@ -1,7 +1,8 @@
 name: TreoPlugin
-version: 2.0
+version: 2.1
 main: vn.treo.TreoPlugin
 api-version: '1.21'
+softdepend: [nLogin, ProtocolLib, ViaVersion]
 commands:
   treo:
     description: Vào trạng thái treo (AFK)
