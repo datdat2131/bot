@@ -1,0 +1,58 @@
+
+name: Build AstraxBot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Prepare Flat source
+        run: |
+          mkdir -p src/main/java src/main/resources
+
+          for f in *.java; do
+            [ -f "$f" ] || continue
+
+            pkg=$(grep -m1 '^package ' "$f" | sed 's/package //;s/;//;s/\./\//g')
+            mkdir -p "src/main/java/$pkg"
+            cp "$f" "src/main/java/$pkg/"
+          done
+
+          cp *.yml src/main/resources/
+
+          echo "Java files:"
+          find src/main/java -name '*.java'
+
+      - name: Build AstraxBot
+        run: mvn -B clean package
+
+      - name: Verify JAR
+        run: |
+          test -f target/AstraxAI.jar
+          jar tf target/AstraxAI.jar | grep -q plugin.yml
+          jar tf target/AstraxAI.jar | grep -q 'com/astrax/ai/AstraxAI.class'
+
+      - name: Upload AstraxBot
+        uses: actions/upload-artifact@v4
+        with:
+          name: AstraxAI
+          path: target/AstraxBot.jar
+          if-no-files-found: error
