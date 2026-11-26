@@ -1,0 +1,11 @@
+name: TreoPlugin
+version: 2.0
+main: vn.treo.TreoPlugin
+api-version: '1.21'
+commands:
+  treo:
+    description: Vào trạng thái treo (AFK)
+    usage: /treo
+  huytreo:
+    description: Hủy trạng thái treo
+    usage: /huytreo
